@@ -83,14 +83,10 @@ jobs:
           PIX_VERSION: ${{ inputs.version }}   # '' = pyproject.toml's version
         run: pyinstaller --noconfirm --clean pix.spec
 
-      - name: Cache the 0.8B smoke-test model
-        uses: actions/cache@v4
-        with:
-          path: app/build/models/0.8B
-          key: qwen3.5-0.8b-bd258782-56e4c6cf   # sha256 prefixes of the two files
-
-      - name: Smoke test the built app (headless, 0.8B model, "Say OK")
-        run: python app/scripts/smoke.py --timeout 900
+      # The built app downloads the 0.8B model itself (HTTPS + certificates + download code, the
+      # path every user takes on first run), then answers "Say OK".
+      - name: Smoke test the built app (downloads the 0.8B model itself, then "Say OK")
+        run: python app/scripts/smoke.py --app-download --timeout 1500
 
       - name: Package
         env:
