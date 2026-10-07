@@ -1,0 +1,151 @@
+name: Build and release Pix
+
+# Builds Pix for macOS (Apple Silicon and Intel), Windows and Linux from the private source repo,
+# smoke-tests each build with the small Qwen3.5-0.8B model, and (when a version is given)
+# publishes the packages as a release here. Public repo = free build minutes.
+#
+# Run it from the Actions tab ("Run workflow"), or: gh workflow run build.yml -R greego-seeroo/Pix -f version=v1.0.0
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. v1.0.0 (leave empty to only build and test)"
+        required: false
+        default: ""
+      ref:
+        description: "Branch, tag or commit of greego-seeroo/Seeroo-Ai to build"
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pix-build-${{ inputs.version || inputs.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,    name: mac-arm64,   package: "Pix-mac-arm64.dmg" }
+          # macos-13 (the old Intel runner) was retired in December 2025; macos-15-intel is
+          # the last x86_64 macOS runner (supported until August 2027).
+          - { os: macos-15-intel,  name: mac-x64,     package: "Pix-mac-x64.dmg" }
+          - { os: windows-latest,  name: windows-x64, package: "Pix-windows-x64.zip" }
+          # 22.04 (glibc 2.35): the bundled Python must not need a newer glibc than users have.
+          - { os: ubuntu-22.04,    name: linux-x64,   package: "Pix-linux-x64.tar.gz" }
+    steps:
+      # The source code lives in the private repo greego-seeroo/Seeroo-Ai; this public repo only
+      # builds and publishes it. SEEROO_AI_DEPLOY_KEY is a read-only deploy key for that repo.
+      - uses: actions/checkout@v4
+        with:
+          repository: greego-seeroo/Seeroo-Ai
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SEEROO_AI_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r app/requirements.txt pyinstaller
+
+      - name: Unit tests
+        run: python -m unittest discover -s app/tests -t app/tests -v
+
+      - name: Cache llama.cpp download
+        uses: actions/cache@v4
+        with:
+          path: app/build/llama/downloads
+          key: llama-b11438-${{ matrix.name }}
+
+      - name: Fetch llama.cpp for this platform
+        run: python app/scripts/fetch_llama.py
+
+      - name: Build with PyInstaller
+        working-directory: app
+        env:
+          PIX_VERSION: ${{ inputs.version }}   # '' = pyproject.toml's version
+        run: pyinstaller --noconfirm --clean pix.spec
+
+      - name: Cache the 0.8B smoke-test model
+        uses: actions/cache@v4
+        with:
+          path: app/build/models/0.8B
+          key: qwen3.5-0.8b-bd258782-56e4c6cf   # sha256 prefixes of the two files
+
+      - name: Smoke test the built app (headless, 0.8B model, "Say OK")
+        run: python app/scripts/smoke.py --timeout 900
+
+      - name: Package
+        env:
+          PIX_VERSION: ${{ inputs.version }}   # '' = pyproject.toml's version
+        run: python app/scripts/package.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: app/dist/${{ matrix.package }}
+          if-no-files-found: error
+          compression-level: 0   # already compressed
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: inputs.version != ''
+    permissions:
+      contents: write   # create the release in this repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Pix-*
+          path: packages
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd packages && sha256sum Pix-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          target_commitish: main
+          name: Pix ${{ inputs.version }}
+          make_latest: true
+          files: packages/*
+          body: |
+            Pix desktop ${{ inputs.version }}: a personal AI assistant for coding that runs on your computer.
+            The model (Qwen3.5) downloads once on first run; after that Pix works offline.
+
+            These builds are not code-signed, so the first launch needs one extra step:
+
+            **macOS 13.3 or newer** (`Pix-mac-arm64.dmg` for Apple Silicon, `Pix-mac-x64.dmg` for Intel):
+            drag Pix to Applications and open it. When macOS refuses, open **System Settings > Privacy & Security**,
+            scroll down and click **Open Anyway** next to the Pix message, then open Pix again.
+            (On macOS 14 and earlier, right-click Pix > Open > Open also works.) If macOS says the app is
+            "damaged", run `xattr -dr com.apple.quarantine /Applications/Pix.app` once in Terminal.
+
+            **Windows 10/11 x64** (`Pix-windows-x64.zip`): unzip and run `Pix\Pix.exe`. SmartScreen:
+            **More info > Run anyway**. If Smart App Control is on (fresh Windows 11 installs), unsigned apps
+            are blocked with no "Run anyway": Pix can only run after Smart App Control is turned off in
+            Windows Security > App & browser control (it can't be turned back on without reinstalling Windows).
+
+            **Linux x64, glibc 2.35+ (Ubuntu 22.04 or newer)** (`Pix-linux-x64.tar.gz`):
+            `tar xzf Pix-linux-x64.tar.gz && ./Pix/Pix` (opens in your browser; quit with Settings > Quit Pix).
+
+            `SHA256SUMS.txt` lists the checksums of the packages.
