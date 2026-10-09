@@ -96,7 +96,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package }}
-          path: app/dist/${{ matrix.package }}
+          # Windows also gets a per-user installer (Start menu and desktop shortcuts), built with the
+          # runner's Inno Setup; the glob simply matches nothing on the other systems.
+          path: |
+            app/dist/${{ matrix.package }}
+            app/dist/Pix-windows-x64-setup.exe
           if-no-files-found: error
           compression-level: 0   # already compressed
 
@@ -136,7 +140,8 @@ jobs:
             (On macOS 14 and earlier, right-click Pix > Open > Open also works.) If macOS says the app is
             "damaged", run `xattr -dr com.apple.quarantine /Applications/Pix.app` once in Terminal.
 
-            **Windows 10/11 x64** (`Pix-windows-x64.zip`): unzip and run `Pix\Pix.exe`. SmartScreen:
+            **Windows 10/11 x64**: run `Pix-windows-x64-setup.exe` (installs for your user, adds Pix to the
+            Start menu and the desktop; no admin rights needed), or unzip `Pix-windows-x64.zip` and run `Pix\Pix.exe`. SmartScreen:
             **More info > Run anyway**. If Smart App Control is on (fresh Windows 11 installs), unsigned apps
             are blocked with no "Run anyway": Pix can only run after Smart App Control is turned off in
             Windows Security > App & browser control (it can't be turned back on without reinstalling Windows).
